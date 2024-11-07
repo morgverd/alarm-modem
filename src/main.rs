@@ -1,18 +1,18 @@
 use std::io::Read;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use serialport::SerialPort;
 use rustfft::{FftPlanner, num_complex::Complex};
 
-const MODEM_PORT: &str = "COM3";     // The modem device port
-const MODEM_BAUD: u32 = 9600;        // Always 9600 using USB modem
-const TONE_MIN_FREQ: f32 = 800.0;    // Minimum frequency (Hz) for tones
-const TONE_MAX_FREQ: f32 = 2400.0;   // Maximum frequency (Hz) for tones
-const PCM_SAMPLE_RATE: f32 = 8000.0; // 8000 Hz
-const FFT_SAMPLE_SIZE: usize = 1024; // Buffer size for FFT
-const FFT_THRESHOLD: f32 = 1000.0;   // FFT magnitude threshold for tones
-
+const MODEM_PORT: &str = "COM3";      // The modem device port
+const MODEM_BAUD: u32 = 9600;         // Always 9600 using USB modem
+const HIGH_PASS_CUTOFF: f32 = 3000.0; //
+const TONE_MIN_FREQ: f32 = 1600.0;    // Minimum frequency (Hz) for tones
+const TONE_MAX_FREQ: f32 = 1700.0;    // Maximum frequency (Hz) for tones
+const PCM_SAMPLE_RATE: f32 = 8000.0;  // 8000 Hz
+const FFT_SAMPLE_SIZE: usize = 1024;  // Buffer size for FFT
+const SIGNAL_THRESHOLD: f32 = 100.0;  // Signal magnitude threshold for tones
 const DURATION_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const DURATION_CMD_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const DURATION_CMD_READ_EMPTY: Duration = Duration::from_millis(100);
@@ -23,7 +23,7 @@ fn send_commands(port: &mut dyn SerialPort, commands: Vec<&'static str>) -> Resu
         port.write_all(format!("{}\r", cmd).as_bytes())?;
 
         let mut buffer = Vec::new();
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
 
         loop {
             if start_time.elapsed() > DURATION_IO_TIMEOUT {
@@ -57,6 +57,19 @@ fn send_commands(port: &mut dyn SerialPort, commands: Vec<&'static str>) -> Resu
     Ok(())
 }
 
+fn high_pass_filter(samples: &mut [i16], cutoff: f32) {
+    let rc = 1.0 / (cutoff * 2.0 * std::f32::consts::PI);
+    let dt = 1.0 / PCM_SAMPLE_RATE;
+    let alpha = dt / (rc + dt);
+
+    let mut previous = samples[0] as f32;
+    for sample in samples.iter_mut() {
+        let filtered = alpha * ((*sample as f32) - previous);
+        previous = *sample as f32;
+        *sample = filtered as i16;
+    }
+}
+
 fn calculate_fft(planner: &mut FftPlanner<f32>, samples: &[i16]) -> Vec<Complex<f32>> {
     let fft = planner.plan_fft_forward(samples.len());
 
@@ -78,7 +91,7 @@ fn detect_tone(fft_output: &[Complex<f32>], sample_rate: f32) -> bool {
         // If the frequency is within the tone range, check if the magnitude is above threshold.
         if frequency >= TONE_MIN_FREQ && frequency <= TONE_MAX_FREQ {
             let magnitude = sample.re.powi(2) + sample.im.powi(2);
-            if magnitude > FFT_THRESHOLD {
+            if magnitude > SIGNAL_THRESHOLD {
                 println!("Detected tone at {} Hz with magnitude: {}", frequency, magnitude);
                 return true;
             }
@@ -87,6 +100,7 @@ fn detect_tone(fft_output: &[Complex<f32>], sample_rate: f32) -> bool {
 
     false
 }
+
 
 fn main() -> Result<()> {
     let mut port = serialport::new(MODEM_PORT, MODEM_BAUD)
@@ -101,7 +115,7 @@ fn main() -> Result<()> {
         "AT",            // Test connection
         "AT+FCLASS=8",   // Voice mode
         "AT+VLS=1",      // Enable Speaker
-        "AT+VGR=2",      // Gain
+        "AT+VGR=3",      // Gain
         "AT+VSM=1,8000", // 8000Hz PCM
         "AT+VRX"         // Start receiving
     ])?;
@@ -117,7 +131,8 @@ fn main() -> Result<()> {
             Ok(n) if n > 0 => {
 
                 // Process the samples using FFT.
-                let samples: Vec<i16> = buffer.iter().map(|&b| b as i16).collect();
+                let mut samples: Vec<i16> = buffer.iter().map(|&b| b as i16).collect();
+                high_pass_filter(&mut samples, HIGH_PASS_CUTOFF);
                 let fft_output = calculate_fft(&mut planner, &samples);
 
                 // Check for non-repeated tone triggers.
@@ -134,6 +149,4 @@ fn main() -> Result<()> {
             Err(e) => return Err(anyhow!(e))
         }
     }
-
-    Ok(())
 }

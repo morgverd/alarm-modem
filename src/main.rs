@@ -2,6 +2,8 @@ use std::io::Read;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
+use env_logger::Env;
+use log::{debug, info};
 use serialport::SerialPort;
 use rustfft::{FftPlanner, num_complex::Complex};
 
@@ -18,11 +20,12 @@ const PCM_SAMPLE_RATE: f32 = 8000.0;  // 8000 Hz
 const FFT_SAMPLE_SIZE: usize = 1024;  // Buffer size for FFT
 
 const DURATION_IO_TIMEOUT: Duration = Duration::from_secs(2);
-const DURATION_CMD_READ_TIMEOUT: Duration = Duration::from_millis(250);
-const DURATION_CMD_READ_EMPTY: Duration = Duration::from_millis(100);
+const DURATION_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const DURATION_READ_EMPTY: Duration = Duration::from_millis(100);
+const DURATION_DETECTION_INTERVAL: Duration = Duration::from_secs(5);
 
 fn send_command(port: &mut dyn SerialPort, cmd: &'static str) -> Result<String> {
-    println!("Sending command: {}", cmd);
+    debug!("Sending command: {}", cmd);
     port.write_all(format!("{}\r", cmd).as_bytes())?;
 
     let mut buffer = Vec::new();
@@ -30,7 +33,7 @@ fn send_command(port: &mut dyn SerialPort, cmd: &'static str) -> Result<String> 
 
     loop {
         if start_time.elapsed() > DURATION_IO_TIMEOUT {
-            eprintln!("Timeout waiting for response to command: {}", cmd);
+            debug!("Timeout waiting for response to command: {}", cmd);
             break;
         }
 
@@ -43,17 +46,17 @@ fn send_command(port: &mut dyn SerialPort, cmd: &'static str) -> Result<String> 
                     break;
                 }
                 Ok(_) => {}
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => sleep(DURATION_CMD_READ_TIMEOUT),
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => sleep(DURATION_READ_TIMEOUT),
                 Err(e) => return Err(e.into())
             }
         } else {
-            sleep(DURATION_CMD_READ_EMPTY);
+            sleep(DURATION_READ_EMPTY);
         }
     }
 
     if !buffer.is_empty() {
         let cleaned = String::from_utf8_lossy(&buffer).chars().filter(|c| c.is_alphanumeric()).collect::<String>();
-        println!("Command response: {}", cleaned);
+        debug!("Command response: {}", cleaned);
         Ok(cleaned)
     } else {
         Err(anyhow!("Failed to send command"))
@@ -83,9 +86,9 @@ fn calculate_fft(planner: &mut FftPlanner<f32>, samples: &[i16]) -> Vec<Complex<
     input
 }
 
-fn detect_tone(fft_output: &[Complex<f32>], sample_rate: f32) -> bool {
+fn detect_tone(fft_output: &[Complex<f32>]) -> bool {
     let num_samples = fft_output.len();
-    let bin_width = sample_rate / num_samples as f32;
+    let bin_width = PCM_SAMPLE_RATE / num_samples as f32;
 
     // Loop over the FFT output and look for frequencies in the modem tone range.
     for (i, &sample) in fft_output.iter().enumerate() {
@@ -95,7 +98,7 @@ fn detect_tone(fft_output: &[Complex<f32>], sample_rate: f32) -> bool {
         if frequency >= TONE_MIN_FREQ && frequency <= TONE_MAX_FREQ {
             let power = sample.re.powi(2) + sample.im.powi(2);
             if power > TONE_MIN_POWER && power < TONE_MAX_POWER {
-                println!("Detected tone at {} Hz with power: {}", frequency, power);
+                debug!("Detected tone at {} Hz with power: {}", frequency, power);
                 return true;
             }
         }
@@ -104,21 +107,22 @@ fn detect_tone(fft_output: &[Complex<f32>], sample_rate: f32) -> bool {
     false
 }
 
-
 fn main() -> Result<()> {
+    env_logger::init_from_env(Env::new().default_filter_or("info"));
     let mut port = serialport::new(MODEM_PORT, MODEM_BAUD)
         .timeout(DURATION_IO_TIMEOUT)
         .open()
         .context("Failed to open serial port")?;
 
-    println!("Initializing modem");
+    info!("Initializing modem");
     send_command(&mut *port, "ATZ")?; // Reset
     let initialization_commands = vec![
         "ATE0",          // Disable echo
         "AT+FCLASS=8",   // Voice mode
-        "AT+VLS=1",      // Enable Speaker
+        "AT+VLS=1",      // Enable speaker
         "AT+VGR=3",      // Gain
-        "AT+VSM=1,8000"  // 8000Hz PCM
+        "AT+VSM=1,8000", // 8000Hz PCM
+        "AT"             // Test connection
     ];
     for cmd in initialization_commands {
         let response = send_command(&mut *port, cmd)?;
@@ -127,21 +131,17 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("Testing line connection");
-    if send_command(&mut *port, "AT")? != "OK" {
-        return Err(anyhow!("Failed to verify line connection"));
-    }
-
     let mut planner = FftPlanner::<f32>::new();
     planner.plan_fft_forward(FFT_SAMPLE_SIZE);
 
-    println!("Connecting to VRX");
+    info!("Connecting to VRX");
     if send_command(&mut *port, "AT+VRX")? != "CONNECT" {
         return Err(anyhow!("Failed to connect to VRX"));
     }
 
-    println!("Listening...");
+    info!("Listening...");
     let mut prev_tone_detected = false;
+    let mut prev_time_detected = Instant::now();
     loop {
         let mut buffer = vec![0; 1024];
         match port.read(&mut buffer) {
@@ -152,17 +152,20 @@ fn main() -> Result<()> {
                 high_pass_filter(&mut samples, HIGH_PASS_CUTOFF);
                 let fft_output = calculate_fft(&mut planner, &samples);
 
-                // Check for non-repeated tone triggers.
-                let tone_detected = detect_tone(&fft_output, PCM_SAMPLE_RATE);
+                // Check for non-repeated tone triggers (exceeding detection interval).
+                let tone_detected = detect_tone(&fft_output);
                 if tone_detected && !prev_tone_detected {
-                    println!("Tone detected!");
+                    if prev_time_detected.elapsed() >= DURATION_DETECTION_INTERVAL {
+                        info!("Detected tone!");
+                        prev_time_detected = Instant::now();
+                    }
                     prev_tone_detected = true;
                 } else if !tone_detected {
                     prev_tone_detected = false;
                 }
             }
             Ok(_) => {}
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => sleep(DURATION_CMD_READ_TIMEOUT),
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => sleep(DURATION_READ_TIMEOUT),
             Err(e) => return Err(anyhow!(e))
         }
     }

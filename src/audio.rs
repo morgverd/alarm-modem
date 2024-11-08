@@ -8,7 +8,8 @@ use serialport::SerialPort;
 use anyhow::Result;
 use crate::READ_TIMEOUT;
 
-const PCM_SAMPLE_RATE: f32 = 8000.0;  // 8000 Hz
+// The target tone is average 1665 Hz, 150 power
+
 const FFT_SAMPLE_SIZE: usize = 1024;  // Buffer size for FFT
 const HIGH_PASS_CUTOFF: f32 = 3000.0; // High pass filter cut off
 const TONE_MIN_FREQ: f32 = 1640.0;    // Minimum frequency (Hz) for tones
@@ -19,7 +20,7 @@ const DETECTION_INTERVAL: Duration = Duration::from_secs(5);
 
 fn high_pass_filter(samples: &mut [i16], cutoff: f32) {
     let rc = 1.0 / (cutoff * 2.0 * std::f32::consts::PI);
-    let dt = 1.0 / PCM_SAMPLE_RATE;
+    let dt = 1.0 / 8000.0;
     let alpha = dt / (rc + dt);
 
     let mut previous = samples[0] as f32;
@@ -42,7 +43,7 @@ fn calculate_fft(planner: &mut FftPlanner<f32>, samples: &[i16]) -> Vec<Complex<
 
 fn detect_tone(fft_output: &[Complex<f32>]) -> bool {
     let num_samples = fft_output.len();
-    let bin_width = PCM_SAMPLE_RATE / num_samples as f32;
+    let bin_width = 8000.0 / num_samples as f32;
 
     // Loop over the FFT output and look for frequencies in the modem tone range.
     for (i, &sample) in fft_output.iter().enumerate() {
@@ -68,9 +69,9 @@ where
     let mut planner = FftPlanner::<f32>::new();
     planner.plan_fft_forward(FFT_SAMPLE_SIZE);
 
-    info!("Listening...");
     let mut prev_tone_detected = false;
     let mut prev_time_detected = Instant::now();
+
     loop {
         let mut buffer = vec![0; 1024];
         match port.read(&mut buffer) {

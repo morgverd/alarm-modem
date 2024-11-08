@@ -1,13 +1,15 @@
 mod audio;
+mod config;
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
+use dotenv::dotenv;
 use env_logger::Env;
 use log::{debug, info};
 use serialport::SerialPort;
 use crate::audio::listen;
-// The target tone is average 1665 Hz, 150 power
+use crate::config::from_env;
 
 const MODEM_PORT: &str = "COM3";      // The modem device port
 const MODEM_BAUD: u32 = 9600;         // Always 9600 using USB modem
@@ -56,7 +58,13 @@ fn send_command(port: &mut dyn SerialPort, cmd: &'static str) -> Result<String> 
 
 fn main() -> Result<()> {
     env_logger::init_from_env(Env::new().default_filter_or("info"));
-    let mut port = serialport::new(MODEM_PORT, MODEM_BAUD)
+
+    info!("Loading config");
+    dotenv().ok();
+    let config = from_env()?;
+
+    debug!("Creating serial port: {} @ {} baud", &config.modem_port, config.modem_baud);
+    let mut port = serialport::new(&config.modem_port, config.modem_baud)
         .timeout(IO_TIMEOUT)
         .open()
         .context("Failed to open serial port")?;
@@ -83,6 +91,7 @@ fn main() -> Result<()> {
         return Err(anyhow!("Failed to connect to VRX"));
     }
 
+    info!("Listening...");
     listen(&mut *port, || {
         info!("Triggered!");
     })?;

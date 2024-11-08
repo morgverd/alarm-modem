@@ -21,44 +21,43 @@ const DURATION_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const DURATION_CMD_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const DURATION_CMD_READ_EMPTY: Duration = Duration::from_millis(100);
 
-fn send_commands(port: &mut dyn SerialPort, commands: Vec<&'static str>) -> Result<()> {
-    for cmd in commands {
-        println!("Sending command: {}", cmd);
-        port.write_all(format!("{}\r", cmd).as_bytes())?;
+fn send_command(port: &mut dyn SerialPort, cmd: &'static str) -> Result<String> {
+    println!("Sending command: {}", cmd);
+    port.write_all(format!("{}\r", cmd).as_bytes())?;
 
-        let mut buffer = Vec::new();
-        let start_time = Instant::now();
+    let mut buffer = Vec::new();
+    let start_time = Instant::now();
 
-        loop {
-            if start_time.elapsed() > DURATION_IO_TIMEOUT {
-                eprintln!("Timeout waiting for response to command: {}", cmd);
-                break;
-            }
-
-            let bytes_to_read = port.bytes_to_read()? as usize;
-            if bytes_to_read > 0 {
-                let mut temp_buffer = vec![0; bytes_to_read];
-                match port.read(&mut temp_buffer) {
-                    Ok(n) if n > 0 => {
-                        buffer.extend_from_slice(&temp_buffer[..n]);
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => sleep(DURATION_CMD_READ_TIMEOUT),
-                    Err(e) => return Err(e.into())
-                }
-            } else {
-                sleep(DURATION_CMD_READ_EMPTY);
-            }
+    loop {
+        if start_time.elapsed() > DURATION_IO_TIMEOUT {
+            eprintln!("Timeout waiting for response to command: {}", cmd);
+            break;
         }
 
-        if !buffer.is_empty() {
-            println!("Response: {}", String::from_utf8_lossy(&buffer).chars().filter(|c| !c.is_control()).collect::<String>());
+        let bytes_to_read = port.bytes_to_read()? as usize;
+        if bytes_to_read > 0 {
+            let mut temp_buffer = vec![0; bytes_to_read];
+            match port.read(&mut temp_buffer) {
+                Ok(n) if n > 0 => {
+                    buffer.extend_from_slice(&temp_buffer[..n]);
+                    break;
+                }
+                Ok(_) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => sleep(DURATION_CMD_READ_TIMEOUT),
+                Err(e) => return Err(e.into())
+            }
         } else {
-            eprintln!("No response received for command: {}", cmd);
+            sleep(DURATION_CMD_READ_EMPTY);
         }
     }
-    Ok(())
+
+    if !buffer.is_empty() {
+        let cleaned = String::from_utf8_lossy(&buffer).chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        println!("Command response: {}", cleaned);
+        Ok(cleaned)
+    } else {
+        Err(anyhow!("Failed to send command"))
+    }
 }
 
 fn high_pass_filter(samples: &mut [i16], cutoff: f32) {
@@ -112,20 +111,34 @@ fn main() -> Result<()> {
         .open()
         .context("Failed to open serial port")?;
 
-    println!("Initializing...");
-    send_commands(&mut *port, vec![
+    println!("Initializing modem");
+    send_command(&mut *port, "ATZ")?; // Reset
+    let initialization_commands = vec![
         "ATE0",          // Disable echo
-        "ATZ",           // Reset
-        "AT",            // Test connection
         "AT+FCLASS=8",   // Voice mode
         "AT+VLS=1",      // Enable Speaker
         "AT+VGR=3",      // Gain
-        "AT+VSM=1,8000", // 8000Hz PCM
-        "AT+VRX"         // Start receiving
-    ])?;
+        "AT+VSM=1,8000"  // 8000Hz PCM
+    ];
+    for cmd in initialization_commands {
+        let response = send_command(&mut *port, cmd)?;
+        if response != "OK" {
+            return Err(anyhow!("Command {cmd} expected OK, instead got: {response}"));
+        }
+    }
+
+    println!("Testing line connection");
+    if send_command(&mut *port, "AT")? != "OK" {
+        return Err(anyhow!("Failed to verify line connection"));
+    }
 
     let mut planner = FftPlanner::<f32>::new();
     planner.plan_fft_forward(FFT_SAMPLE_SIZE);
+
+    println!("Connecting to VRX");
+    if send_command(&mut *port, "AT+VRX")? != "CONNECT" {
+        return Err(anyhow!("Failed to connect to VRX"));
+    }
 
     println!("Listening...");
     let mut prev_tone_detected = false;

@@ -5,14 +5,18 @@ use anyhow::{anyhow, Context, Result};
 use serialport::SerialPort;
 use rustfft::{FftPlanner, num_complex::Complex};
 
+// The target tone is average 1665 Hz, 150 power
+
 const MODEM_PORT: &str = "COM3";      // The modem device port
 const MODEM_BAUD: u32 = 9600;         // Always 9600 using USB modem
-const HIGH_PASS_CUTOFF: f32 = 3000.0; //
-const TONE_MIN_FREQ: f32 = 1600.0;    // Minimum frequency (Hz) for tones
-const TONE_MAX_FREQ: f32 = 1700.0;    // Maximum frequency (Hz) for tones
+const HIGH_PASS_CUTOFF: f32 = 3000.0; // High pass filter cut off
+const TONE_MIN_FREQ: f32 = 1640.0;    // Minimum frequency (Hz) for tones
+const TONE_MAX_FREQ: f32 = 1720.0;    // Maximum frequency (Hz) for tones
+const TONE_MIN_POWER: f32 = 100.0;    // Minimum power for a tone
+const TONE_MAX_POWER: f32 = 300.0;    // Maximum power for a tone
 const PCM_SAMPLE_RATE: f32 = 8000.0;  // 8000 Hz
 const FFT_SAMPLE_SIZE: usize = 1024;  // Buffer size for FFT
-const SIGNAL_THRESHOLD: f32 = 100.0;  // Signal magnitude threshold for tones
+
 const DURATION_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const DURATION_CMD_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const DURATION_CMD_READ_EMPTY: Duration = Duration::from_millis(100);
@@ -88,11 +92,11 @@ fn detect_tone(fft_output: &[Complex<f32>], sample_rate: f32) -> bool {
     for (i, &sample) in fft_output.iter().enumerate() {
         let frequency = i as f32 * bin_width;
 
-        // If the frequency is within the tone range, check if the magnitude is above threshold.
+        // If the frequency is within the tone range, check if the power is above threshold.
         if frequency >= TONE_MIN_FREQ && frequency <= TONE_MAX_FREQ {
-            let magnitude = sample.re.powi(2) + sample.im.powi(2);
-            if magnitude > SIGNAL_THRESHOLD {
-                println!("Detected tone at {} Hz with magnitude: {}", frequency, magnitude);
+            let power = sample.re.powi(2) + sample.im.powi(2);
+            if power > TONE_MIN_POWER && power < TONE_MAX_POWER {
+                println!("Detected tone at {} Hz with power: {}", frequency, power);
                 return true;
             }
         }

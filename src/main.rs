@@ -6,16 +6,45 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use dotenv::dotenv;
 use env_logger::Env;
-use log::{debug, info};
+use log::{debug, error, info, warn};
 use serialport::SerialPort;
+use ureq::post;
 use crate::audio::listen;
 use crate::config::from_env;
 
-const MODEM_PORT: &str = "COM3";      // The modem device port
-const MODEM_BAUD: u32 = 9600;         // Always 9600 using USB modem
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_millis(250);
 const READ_EMPTY: Duration = Duration::from_millis(100);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_RETRY_DELAY: Duration = Duration::from_secs(2);
+const REQUEST_MAX_RETRIES: i32 = 3;
+
+pub(crate) fn send_webhook(url: &str, key: &str) -> bool {
+    let mut attempts = 0;
+    while attempts < REQUEST_MAX_RETRIES {
+
+        debug!("Attempting to send webhook request");
+        attempts += 1;
+        let response = post(url)
+            .set("Authorization", key)
+            .timeout(REQUEST_TIMEOUT)
+            .call();
+
+        match response {
+            Ok(resp) => {
+                let status = resp.status();
+                if status >= 200 && status <= 204 {
+                    info!("Successfully sent webhook, got back {status}");
+                    return true;
+                }
+                warn!("Request failed with status: {status}");
+            },
+            Err(e) => error!("Request failed with error: {}", e)
+        }
+        sleep(REQUEST_RETRY_DELAY);
+    }
+    false
+}
 
 fn send_command(port: &mut dyn SerialPort, cmd: &'static str) -> Result<String> {
     debug!("Sending command: {}", cmd);
@@ -70,9 +99,9 @@ fn main() -> Result<()> {
         .context("Failed to open serial port")?;
 
     info!("Initializing modem");
-    send_command(&mut *port, "ATZ")?; // Reset
+    send_command(&mut *port, "ATZ")?;  // Reset
+    send_command(&mut *port, "ATE0")?; // Disable echo
     let initialization_commands = vec![
-        "ATE0",          // Disable echo
         "AT+FCLASS=8",   // Voice mode
         "AT+VLS=1",      // Enable speaker
         "AT+VGR=3",      // Gain
@@ -93,7 +122,10 @@ fn main() -> Result<()> {
 
     info!("Listening...");
     listen(&mut *port, || {
-        info!("Triggered!");
+        info!("Detected trigger tone, sending webhook");
+        if !send_webhook(&config.webhook_url, &config.webhook_key) {
+            error!("Failed to send webhook for detection");
+        }
     })?;
     Ok(())
 }

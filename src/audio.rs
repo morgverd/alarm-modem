@@ -1,7 +1,7 @@
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use anyhow::anyhow;
-use log::{debug, info};
+use log::debug;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
 use serialport::SerialPort;

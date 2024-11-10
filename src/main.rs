@@ -15,15 +15,15 @@ use crate::config::from_env;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_millis(250);
 const READ_EMPTY: Duration = Duration::from_millis(100);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_RETRY_DELAY: Duration = Duration::from_secs(2);
-const REQUEST_MAX_RETRIES: i32 = 3;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_RETRY_DELAY: Duration = Duration::from_secs(20);
+const REQUEST_MAX_RETRIES: i32 = 1440; // Retry for 6 hours.
 
-pub(crate) fn send_webhook(url: &str, key: &str) -> bool {
+fn send_webhook(url: &str, key: &str) -> bool {
     let mut attempts = 0;
     while attempts < REQUEST_MAX_RETRIES {
 
-        debug!("Attempting to send webhook request");
+        debug!("Attempting to send webhook request, attempt: {attempts}");
         attempts += 1;
         let response = post(url)
             .set("Authorization", key)
@@ -41,6 +41,8 @@ pub(crate) fn send_webhook(url: &str, key: &str) -> bool {
             },
             Err(e) => error!("Request failed with error: {}", e)
         }
+
+        debug!("Sleeping for {:#?} before retrying webhook", REQUEST_RETRY_DELAY);
         sleep(REQUEST_RETRY_DELAY);
     }
     false

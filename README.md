@@ -8,6 +8,7 @@ but for some reason either the modem or alarm doesn't seem to want to do that an
 to figure out which it is.
 
 Once the tone is detected, a POST request is sent to the webhook URL.
+The webhook will be retried every 20 seconds for 6 hours if there is not a successful response from the webhook.
 
 ### Env vars
 

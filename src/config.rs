@@ -1,7 +1,6 @@
 use std::env::var;
 use anyhow::{Context, Result};
 
-#[derive(Debug)]
 pub(crate) struct Config {
     pub modem_port: String,
     pub modem_baud: u32,
